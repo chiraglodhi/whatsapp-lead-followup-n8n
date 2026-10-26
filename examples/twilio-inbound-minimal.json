@@ -1,0 +1,7 @@
+{
+  "_note": "Minimal example. Only the fields WF2 reads are shown (From, Body, MessageSid, ProfileName). A real Twilio WhatsApp webhook carries more fields; capture one from your own account before relying on any other field. The X-Twilio-Signature header is also required and is not shown here.",
+  "From": "whatsapp:+919876543210",
+  "Body": "Looking for a 2BHK in Indore, budget 50 lakh",
+  "MessageSid": "SMxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "ProfileName": "Example Lead"
+}

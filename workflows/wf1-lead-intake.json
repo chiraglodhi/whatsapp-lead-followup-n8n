@@ -1,0 +1,228 @@
+{
+  "name": "WF1 - Lead Intake",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "// Code node → JavaScript\n// ASSUMPTION — verify field names (name, phone, consent, preferred_language) in the form trigger's Output panel\nconst raw = $input.first().json;\nlet phone = (raw.phone || '').replace(/[\\s\\-\\(\\)]/g, '');\n\nif (phone.startsWith('0')) phone = '+91' + phone.slice(1);\nelse if (!phone.startsWith('+')) phone = '+91' + phone;\n\nconst valid = /^\\+91\\d{10}$/.test(phone);\nconst consent = raw.consent === true || raw.consent === 'true' || raw.consent === 'yes';\nconst lang = ['hi', 'en'].includes(raw.preferred_language) ? raw.preferred_language : 'bilingual';\n\nreturn [{\n  json: {\n    phone,\n    name: (raw.name || '').trim(),\n    source: 'form',\n    preferred_language: lang,\n    consent,\n    valid_phone: valid,\n    raw_payload: raw\n  }\n}];"
+      },
+      "name": "Normalize lead",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-992, -912]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 3 },
+          "conditions": [
+            { "leftValue": "={{ $json.valid_phone }}", "operator": { "type": "boolean", "operation": "true", "singleValue": true } },
+            { "leftValue": "={{ $json.consent }}", "operator": { "type": "boolean", "operation": "true", "singleValue": true } }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "Valid phone?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [-1136, -720]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "leads",
+        "limit": 1,
+        "matchType": "allFilters",
+        "filters": { "conditions": [ { "keyName": "phone", "condition": "eq", "keyValue": "={{ $json.phone }}" } ] }
+      },
+      "name": "Find lead by phone",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [-704, -912],
+      "alwaysOutputData": true,
+      "credentials": { "supabaseApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Supabase - lead-followup" } }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 3 },
+          "conditions": [
+            { "leftValue": "={{ !$json.id }}", "operator": { "type": "boolean", "operation": "true", "singleValue": true } }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "Is new lead?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [-528, -912]
+    },
+    {
+      "parameters": {
+        "tableId": "leads",
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "phone", "fieldValue": "={{ $('Normalize lead').item.json.phone }}" },
+            { "fieldId": "name", "fieldValue": "={{ $('Normalize lead').item.json.name }}" },
+            { "fieldId": "source", "fieldValue": "={{ $('Normalize lead').item.json.source }}" },
+            { "fieldId": "preferred_language", "fieldValue": "={{ $('Normalize lead').item.json.preferred_language }}" },
+            { "fieldId": "raw_payload", "fieldValue": "={{ $('Normalize lead').item.json.raw_payload }}" },
+            { "fieldId": "score", "fieldValue": "cold" },
+            { "fieldId": "status", "fieldValue": "new" }
+          ]
+        }
+      },
+      "name": "Insert lead",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [-672, -720],
+      "credentials": { "supabaseApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Supabase - lead-followup" } }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Code node → JavaScript\n// Reads from Normalize lead explicitly so it doesn't depend on what Insert lead returns\nconst lead = $('Normalize lead').first().json;\nconst lang = lead.preferred_language;\nconst name = lead.name || '';\n\nconst openers = {\n  hi: `नमस्ते ${name}! 🏠 आपने रियल एस्टेट में रुचि दिखाई है। मैं आपकी ज़रूरतें समझने में मदद करूँगा।\\n\\nइस चैट को बंद करने के लिए UNSUBSCRIBE लिखें।`,\n  en: `Hi ${name}! 🏠 Thanks for your interest in real estate. I'll help understand what you're looking for.\\n\\nType UNSUBSCRIBE to stop receiving messages.`,\n  bilingual: `नमस्ते ${name}! 🏠 Hi! आपने रियल एस्टेट में रुचि दिखाई है। Thanks for your interest!\\n\\nमैं आपकी ज़रूरतें समझने में मदद करूँगा। I'll help understand what you're looking for.\\n\\nType UNSUBSCRIBE / UNSUBSCRIBE लिखें to stop.`\n};\n\nreturn [{\n  json: {\n    lead_id: $('Insert lead').first().json.id, \n    phone: lead.phone,\n    opener_text: openers[lang] || openers.bilingual\n  }\n}];"
+      },
+      "name": "Choose opener language",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-160, -912]
+    },
+    {
+      "parameters": {
+        "from": "+14155238886",
+        "to": "={{ $json.phone }}",
+        "toWhatsapp": true,
+        "message": "={{ $json.opener_text }}",
+        "options": {}
+      },
+      "name": "Send WhatsApp opener",
+      "type": "n8n-nodes-base.twilio",
+      "typeVersion": 1,
+      "position": [32, -912],
+      "onError": "continueErrorOutput",
+      "credentials": { "twilioApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Twilio - WhatsApp Sandbox" } }
+    },
+    {
+      "parameters": {
+        "tableId": "messages",
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "lead_id", "fieldValue": "={{ $('Choose opener language').item.json.lead_id }}" },
+            { "fieldId": "direction", "fieldValue": "out" },
+            { "fieldId": "content", "fieldValue": "={{ $('Choose opener language').item.json.opener_text }}" }
+          ]
+        }
+      },
+      "name": "Log opener",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [224, -912],
+      "credentials": { "supabaseApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Supabase - lead-followup" } }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "leads",
+        "matchType": "allFilters",
+        "filters": { "conditions": [ { "keyName": "id", "condition": "eq", "keyValue": "={{ $('Choose opener language').item.json.lead_id }}" } ] },
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "status", "fieldValue": "contacted" },
+            { "fieldId": "next_follow_up_at", "fieldValue": "={{ $now.plus({ days: 1 }).toISO() }}" }
+          ]
+        }
+      },
+      "name": "Mark contacted",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [416, -912],
+      "credentials": { "supabaseApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Supabase - lead-followup" } }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "leads",
+        "matchType": "allFilters",
+        "filters": { "conditions": [ { "keyName": "id", "condition": "eq", "keyValue": "={{ $('Choose opener language').item.json.lead_id }}" } ] },
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "status", "fieldValue": "error" },
+            { "fieldId": "send_error", "fieldValue": "={{ $json.error }}" }
+          ]
+        }
+      },
+      "name": "Mark send failed",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [-32, -672],
+      "credentials": { "supabaseApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Supabase - lead-followup" } }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": { "__rl": true, "value": "YOUR_SLACK_CHANNEL_ID", "mode": "id" },
+        "text": "=⚠️ WF1 Send Failed\n\nLead: {{ $('Normalize lead').item.json.name }} ({{ $('Normalize lead').item.json.phone }})\n\nWorkflow: WF1 - Lead Intake\n\nError: {{ $('Mark send failed').item.json.send_error }}\nTime: {{ $now.toISO() }}\nAction: check the lead's status in Supabase and retry manually",
+        "otherOptions": { "includeLinkToWorkflow": false }
+      },
+      "name": "Alert Slack: send failed",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.7,
+      "position": [176, -672],
+      "credentials": { "slackApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Slack - Lead Alerts Bot" } }
+    },
+    {
+      "parameters": {
+        "formTitle": "Property Inquiry",
+        "formFields": {
+          "values": [
+            { "fieldLabel": "name" },
+            { "fieldLabel": "phone" },
+            { "fieldLabel": "preferred_language", "fieldType": "dropdown", "fieldOptions": { "values": [ { "option": "hi" }, { "option": "en" }, { "option": "bilingual" } ] } },
+            { "fieldLabel": "consent", "fieldType": "dropdown", "fieldOptions": { "values": [ { "option": "yes" } ] } }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Property Inquiry",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.6,
+      "position": [-1168, -912]
+    },
+    {
+      "parameters": { "content": "LEAD VALIDATION", "height": 384, "width": 384 },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [-1184, -944],
+      "typeVersion": 1,
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": { "content": "DEDUP &  INSERT\n", "height": 384, "width": 384, "color": 3 },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [-768, -944],
+      "typeVersion": 1,
+      "name": "Sticky Note1"
+    },
+    {
+      "parameters": { "content": "SEND & LOG\n", "height": 432, "width": 864, "color": "#0E042A" },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [-224, -944],
+      "typeVersion": 1,
+      "name": "Sticky Note2"
+    }
+  ],
+  "connections": {
+    "Normalize lead": { "main": [[{ "node": "Valid phone?", "type": "main", "index": 0 }]] },
+    "Valid phone?": { "main": [[{ "node": "Find lead by phone", "type": "main", "index": 0 }]] },
+    "Find lead by phone": { "main": [[{ "node": "Is new lead?", "type": "main", "index": 0 }]] },
+    "Is new lead?": { "main": [[{ "node": "Insert lead", "type": "main", "index": 0 }]] },
+    "Insert lead": { "main": [[{ "node": "Choose opener language", "type": "main", "index": 0 }]] },
+    "Choose opener language": { "main": [[{ "node": "Send WhatsApp opener", "type": "main", "index": 0 }]] },
+    "Send WhatsApp opener": { "main": [[{ "node": "Log opener", "type": "main", "index": 0 }], [{ "node": "Mark send failed", "type": "main", "index": 0 }]] },
+    "Log opener": { "main": [[{ "node": "Mark contacted", "type": "main", "index": 0 }]] },
+    "Mark send failed": { "main": [[{ "node": "Alert Slack: send failed", "type": "main", "index": 0 }]] },
+    "Property Inquiry": { "main": [[{ "node": "Normalize lead", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "active": false
+}

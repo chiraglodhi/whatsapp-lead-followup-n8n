@@ -1,0 +1,5 @@
+{
+  "_note": "WF4 form fields. The confirm field must be exactly DELETE.",
+  "phone": "+919876543210",
+  "confirm": "DELETE"
+}

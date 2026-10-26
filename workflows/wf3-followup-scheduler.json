@@ -1,0 +1,263 @@
+{
+  "name": "WF3 — Follow-up Scheduler",
+  "nodes": [
+    {
+      "parameters": { "rule": { "interval": [ { "field": "hours", "hoursInterval": 1 } ] } },
+      "name": "Every 60 min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [0, 464]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "leads",
+        "limit": 20,
+        "orderBy": "next_follow_up_at.asc",
+        "matchType": "allFilters",
+        "filters": {
+          "conditions": [
+            { "keyName": "next_follow_up_at", "condition": "lte", "keyValue": "={{ $now.toUTC().toISO() }}" },
+            { "keyName": "opted_out", "condition": "eq", "keyValue": "false" },
+            { "keyName": "followup_count", "condition": "lt", "keyValue": "3" },
+            { "keyName": "status", "condition": "neq", "keyValue": "handoff" },
+            { "keyName": "status", "condition": "neq", "keyValue": "closed" },
+            { "keyName": "status", "condition": "neq", "keyValue": "error" }
+          ]
+        }
+      },
+      "name": "Query leads due",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [224, 464],
+      "credentials": { "supabaseApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Supabase - lead-followup" } }
+    },
+    {
+      "parameters": { "options": {} },
+      "name": "Loop each lead",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [448, 464]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "messages",
+        "limit": 10,
+        "orderBy": "created_at.desc",
+        "matchType": "allFilters",
+        "filters": { "conditions": [ { "keyName": "lead_id", "condition": "eq", "keyValue": "={{ $json.id }}" } ] }
+      },
+      "name": "Fetch last 10 messages",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [672, 96],
+      "alwaysOutputData": true,
+      "credentials": { "supabaseApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Supabase - lead-followup" } }
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "qualifications",
+        "limit": 1,
+        "matchType": "allFilters",
+        "filters": { "conditions": [ { "keyName": "lead_id", "condition": "eq", "keyValue": "={{ $(\"Loop each lead\").first().json.id }}" } ] }
+      },
+      "name": "Fetch qualification",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [896, 96],
+      "executeOnce": true,
+      "alwaysOutputData": true,
+      "credentials": { "supabaseApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Supabase - lead-followup" } }
+    },
+    {
+      "parameters": {
+        "jsCode": "const lead = $('Loop each lead').first().json;\nconst msgs = $('Fetch last 10 messages').all().map(i => i.json).filter(m => m && m.id); // newest first\nconst qual = $('Fetch qualification').first()?.json || {};\n\n// Twilio sandbox allows free-form messages only within 24h of the lead's last INBOUND message.\n// 23h threshold leaves a safety margin for clock skew and run delay.\nconst lastIn = msgs.find(m => m.direction === 'in');\nconst hoursSince = lastIn ? (Date.now() - new Date(lastIn.created_at).getTime()) / 3600000 : null;\nconst windowOpen = hoursSince !== null && hoursSince < 23;\n\n// Cadence: gaps[k] = days until the next follow-up once k follow-ups have been sent.\n// WF2 already schedules follow-up 1 (warm +1 day, cold +3 days). Warm max 3, cold max 2.\nconst n = (lead.followup_count || 0) + 1;\nconst gaps = lead.score === 'warm' ? [1, 3, 7] : lead.score === 'cold' ? [3, 7] : [];\nconst nextDays = gaps[n];\nconst nextAt = nextDays ? new Date(Date.now() + nextDays * 86400000).toISOString() : null;\n\n// Reply language: code decides from the lead's last 3 inbound messages, the model only follows it.\n// Any Devanagari in them -> Hindi. Latin-only -> English. Stored preference is used only when there is no inbound message.\nconst recentIn = msgs.filter(m => m.direction === 'in').slice(0, 3);\nconst hasDevanagari = recentIn.some(m => /[\\u0900-\\u097F]/.test(m.content || ''));\nlet lang;\nif (hasDevanagari) lang = 'hi';\nelse if (recentIn.length > 0) lang = 'en';\nelse lang = lead.preferred_language === 'hi' ? 'hi' : 'en';\nconst langName = lang === 'hi' ? 'Hindi' : 'English';\n\nconst SYSTEM_PROMPT = 'You are a real estate assistant following up with a lead on WhatsApp. This is an automated follow-up, not a reply to a new message.\\n\\n' +\n'The lead has not replied recently. Your job is to send a short, friendly nudge to re-engage them. Base your follow-up on what you know about them.\\n\\n' +\n'Rules:\\n' +\n'1. Keep it very short: 1-2 sentences max. This is a nudge, not a pitch.\\n' +\n'2. Reference something specific from the conversation if possible (their budget, location interest, etc.).\\n' +\n'3. Do NOT re-introduce yourself or re-explain the service.\\n' +\n'4. Do NOT pressure them. One gentle question is ideal.\\n' +\n'5. Write in the language named in the last line of the user prompt.\\n' +\n'6. If you have nothing specific to reference, ask a simple open question like \\\"Still looking for a property?\\\"\\n' +\n'7. Never promise, schedule or confirm a call, visit or callback.\\n\\n' +\n'Return ONLY a single JSON object, no markdown, no explanation:\\n' +\n'{\\\"reply_text\\\": \\\"your follow-up message\\\", \\\"language\\\": \\\"hi\\\" or \\\"en\\\"}';\n\nconst fields = ['budget', 'location', 'property_type', 'timeline'];\nconst known = fields.filter(f => qual[f]);\nlet knownText = '';\nif (known.length) knownText = 'What we already know about the lead:\\n' + known.map(f => '- ' + f + ': ' + qual[f]).join('\\n') + '\\n';\n\nlet history = '';\nfor (const m of [...msgs].reverse()) history += (m.direction === 'out' ? 'Agent' : 'Lead') + ': ' + m.content + '\\n';\n\nconst userPrompt = 'Lead name: ' + (lead.name || 'unknown') + '\\n' +\n'Lead score: ' + lead.score + '\\n' +\n'This is automated follow-up ' + n + ' of ' + gaps.length + '.\\n\\n' +\nknownText + '\\nConversation so far:\\n' + history +\n'\\nWrite the follow-up nudge. Write reply_text in ' + langName + ' and set \"language\" to \"' + lang + '\".';\n\nreturn [{ json: {\n  lead_id: lead.id,\n  phone: lead.phone,\n  name: lead.name,\n  score: lead.score,\n  new_count: n,\n  next_follow_up_at: nextAt,\n  window_open: windowOpen,\n  hours_since_inbound: hoursSince === null ? null : Math.round(hoursSince * 10) / 10,\n  fail_reason: windowOpen ? null : 'outside_24h_window',\n  system_prompt: SYSTEM_PROMPT,\n  user_prompt: userPrompt\n} }];"
+      },
+      "name": "Build follow-up context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 96]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 3 },
+          "conditions": [
+            { "leftValue": "={{ $json.window_open }}", "operator": { "type": "boolean", "operation": "true", "singleValue": true } }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "Window open?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [1344, 96]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: \"gpt-4o-mini\",\n  messages: [\n    { role: \"system\", content: $json.system_prompt },\n    { role: \"user\", content: $json.user_prompt }\n  ],\n  response_format: { type: \"json_object\" },\n  temperature: 0.3\n}) }}",
+        "options": { "timeout": 30000 }
+      },
+      "name": "LLM draft follow-up",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [1568, 48],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "onError": "continueErrorOutput",
+      "credentials": { "openAiApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "OpenAI account" } }
+    },
+    {
+      "parameters": {
+        "jsCode": "const res = $input.first().json;\nconst raw = res.choices?.[0]?.message?.content ?? '';\n\nlet ok = false, error = null, reply = '', lang = null;\ntry {\n  const d = JSON.parse(raw);\n  if (typeof d.reply_text !== 'string' || !d.reply_text.trim()) throw new Error('reply_text missing');\n  if (!['hi', 'en'].includes(d.language)) throw new Error('bad language');\n  reply = d.reply_text.trim();\n  if (reply.length > 400) throw new Error('reply too long for a nudge');\n  lang = d.language;\n  ok = true;\n} catch (e) {\n  error = e.message;\n}\n\n// Score, status and counters are never taken from the model. Code owns them.\nreturn [{ json: { parse_ok: ok, reply_text: reply, language: lang, fail_reason: ok ? null : 'llm_bad_output: ' + error } }];"
+      },
+      "name": "Parse follow-up",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1792, 48]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 1 },
+          "conditions": [
+            { "leftValue": "={{ $json.parse_ok }}", "operator": { "type": "boolean", "operation": "true", "singleValue": true } }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "Parse OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [2016, 48]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "leads",
+        "matchType": "allFilters",
+        "filters": { "conditions": [ { "keyName": "id", "condition": "eq", "keyValue": "={{ $(\"Build follow-up context\").first().json.lead_id }}" } ] },
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "followup_count", "fieldValue": "={{ $(\"Build follow-up context\").first().json.new_count }}" },
+            { "fieldId": "next_follow_up_at", "fieldValue": "={{ $(\"Build follow-up context\").first().json.next_follow_up_at }}" }
+          ]
+        }
+      },
+      "name": "Update lead",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [2240, 0],
+      "credentials": { "supabaseApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Supabase - lead-followup" } }
+    },
+    {
+      "parameters": {
+        "from": "+14155238886",
+        "to": "={{ $(\"Build follow-up context\").first().json.phone }}",
+        "toWhatsapp": true,
+        "message": "={{ $(\"Parse follow-up\").first().json.reply_text }}",
+        "options": {}
+      },
+      "name": "Send follow-up",
+      "type": "n8n-nodes-base.twilio",
+      "typeVersion": 1,
+      "position": [2464, 0],
+      "onError": "continueErrorOutput",
+      "credentials": { "twilioApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Twilio - WhatsApp Sandbox" } }
+    },
+    {
+      "parameters": {
+        "tableId": "messages",
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "lead_id", "fieldValue": "={{ $(\"Build follow-up context\").first().json.lead_id }}" },
+            { "fieldId": "direction", "fieldValue": "out" },
+            { "fieldId": "content", "fieldValue": "={{ $(\"Parse follow-up\").first().json.reply_text }}" },
+            { "fieldId": "external_id", "fieldValue": "={{ $json.sid ?? null }}" }
+          ]
+        }
+      },
+      "name": "Log follow-up",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [2688, 48],
+      "onError": "continueRegularOutput",
+      "credentials": { "supabaseApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Supabase - lead-followup" } }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "leads",
+        "matchType": "allFilters",
+        "filters": { "conditions": [ { "keyName": "id", "condition": "eq", "keyValue": "={{ $(\"Loop each lead\").first().json.id }}" } ] },
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "send_error", "fieldValue": "={{ ($json.fail_reason ?? (\"error: \" + (typeof $json.error === 'string' ? $json.error : ($json.error?.message ?? \"unknown\")))).slice(0, 200) }}" },
+            { "fieldId": "next_follow_up_at", "fieldValue": "={{ null }}" }
+          ]
+        }
+      },
+      "name": "Park lead",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [2688, 240],
+      "credentials": { "supabaseApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Supabase - lead-followup" } }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": { "__rl": true, "value": "#lead-alerts", "mode": "name" },
+        "text": "=⏰ FOLLOW-UP NOT SENT\nLead: {{ $(\"Loop each lead\").first().json.name }} ({{ $(\"Loop each lead\").first().json.phone }})\nWorkflow: WF3\nReason: {{ $json.send_error }}\nAction needed: {{ $json.send_error === \"outside_24h_window\" ? \"Follow-up was due but the WhatsApp 24h session window is closed (sandbox has no approved templates). Message the lead manually. Automated follow-ups for this lead are paused.\" : \"Automated follow-up failed. Check the execution log and follow up manually. Automated follow-ups for this lead are paused.\" }}\nTime: {{ $now.toISO() }}",
+        "otherOptions": { "includeLinkToWorkflow": false }
+      },
+      "name": "Alert Slack: follow-up not sent",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.7,
+      "position": [2912, 432],
+      "onError": "continueRegularOutput",
+      "credentials": { "slackApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Slack - Lead Alerts Bot" } }
+    },
+    {
+      "parameters": {
+        "content": "## WF3 follow-up scheduler\nRuns hourly. Cadence: warm 1/3/7 days, cold 3/7 days (WF2 sets follow-up 1). Counters advance BEFORE the send so a crash cannot double-message a lead. Sandbox limit: free-form sends only within 24h of the last inbound message, otherwise the lead is parked and Slack is alerted.",
+        "height": 224,
+        "width": 384,
+        "color": 4
+      },
+      "name": "Sticky Note 12fdf87b",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-32, -208]
+    }
+  ],
+  "connections": {
+    "Every 60 min": { "main": [[{ "node": "Query leads due", "type": "main", "index": 0 }]] },
+    "Query leads due": { "main": [[{ "node": "Loop each lead", "type": "main", "index": 0 }]] },
+    "Fetch last 10 messages": { "main": [[{ "node": "Fetch qualification", "type": "main", "index": 0 }]] },
+    "Fetch qualification": { "main": [[{ "node": "Build follow-up context", "type": "main", "index": 0 }]] },
+    "Build follow-up context": { "main": [[{ "node": "Window open?", "type": "main", "index": 0 }]] },
+    "Window open?": { "main": [[{ "node": "LLM draft follow-up", "type": "main", "index": 0 }], [{ "node": "Park lead", "type": "main", "index": 0 }]] },
+    "LLM draft follow-up": { "main": [[{ "node": "Parse follow-up", "type": "main", "index": 0 }], [{ "node": "Park lead", "type": "main", "index": 0 }]] },
+    "Parse follow-up": { "main": [[{ "node": "Parse OK?", "type": "main", "index": 0 }]] },
+    "Parse OK?": { "main": [[{ "node": "Update lead", "type": "main", "index": 0 }], [{ "node": "Park lead", "type": "main", "index": 0 }]] },
+    "Update lead": { "main": [[{ "node": "Send follow-up", "type": "main", "index": 0 }]] },
+    "Send follow-up": { "main": [[{ "node": "Log follow-up", "type": "main", "index": 0 }], [{ "node": "Park lead", "type": "main", "index": 0 }]] },
+    "Log follow-up": { "main": [[{ "node": "Loop each lead", "type": "main", "index": 0 }]] },
+    "Loop each lead": { "main": [[], [{ "node": "Fetch last 10 messages", "type": "main", "index": 0 }]] },
+    "Park lead": { "main": [[{ "node": "Alert Slack: follow-up not sent", "type": "main", "index": 0 }]] },
+    "Alert Slack: follow-up not sent": { "main": [[{ "node": "Loop each lead", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "active": false
+}

@@ -1,0 +1,12 @@
+{
+  "_note": "The JSON object WF2's prompt asks gpt-4o-mini to return. WF2's Parse LLM node validates it; anything missing or outside the allowed values routes to the fallback path. 'handoff' is ignored from the model: code sets it (true only when the code-checked score is hot).",
+  "reply_text": "Nice, Indore works. When are you planning to buy?",
+  "language": "en",
+  "extracted": { "budget": "50 lakh", "location": "Indore", "property_type": "apartment", "timeline": null },
+  "visit_requested": false,
+  "score": "warm",
+  "score_reason": "Budget and location known, timeline unknown.",
+  "missing_fields": ["timeline"],
+  "handoff": false,
+  "summary": "Looking for a 2BHK apartment in Indore around 50 lakh; timeline not given."
+}

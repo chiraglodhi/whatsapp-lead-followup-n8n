@@ -1,0 +1,585 @@
+{
+  "name": "WF2 — Reply Handler",
+  "nodes": [
+    {
+      "parameters": { "httpMethod": "POST", "path": "twilio-inbound", "responseMode": "responseNode", "options": {} },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.2,
+      "position": [-2416, -656],
+      "name": "Webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst item = $input.first().json;\n\nconst token = $vars.TWILIO_AUTH_TOKEN;\nconst signature = item.headers?.['x-twilio-signature'] || '';\n// ASSUMPTION — verify: webhookUrl is the exact URL Twilio called. It showed\n// /webhook-test/... on your test capture; confirm it shows /webhook/... in a\n// production execution before trusting it live.\nconst url = item.webhookUrl;\nconst params = item.body || {};\n\nlet valid = false;\nlet reason = null;\n\nif (!token) reason = 'missing_auth_token';\nelse if (!signature) reason = 'missing_signature_header';\nelse if (!url) reason = 'missing_webhook_url';\nelse {\n  // Twilio's documented algorithm: URL + each POST param (sorted by key) as key+value,\n  // HMAC-SHA1 with the auth token, base64.\n  // UNVERIFIED in n8n: sort order and body parsing are confirmed only if this returns true.\n  let data = url;\n  for (const key of Object.keys(params).sort()) data += key + params[key];\n  const expected = crypto.createHmac('sha1', token).update(data, 'utf8').digest('base64');\n  const a = Buffer.from(signature);\n  const b = Buffer.from(expected);\n  valid = a.length === b.length && crypto.timingSafeEqual(a, b);\n  if (!valid) reason = 'signature_mismatch';\n}\n\n// Pass the original item through so later nodes can still read headers/body.\nreturn [{ json: { ...item, signature_valid: valid, signature_reason: reason } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-2192, -656],
+      "name": "Verify Twilio signature"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 3 },
+          "conditions": [ { "leftValue": "={{ $json.signature_valid }}", "rightValue": "", "operator": { "type": "boolean", "operation": "true", "singleValue": true } } ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [-1968, -656],
+      "name": "Signature valid?"
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "<Response></Response>",
+        "options": { "responseCode": 200, "responseHeaders": { "entries": [ { "name": "Content-Type", "value": "text/xml" } ] } }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [-1744, -752],
+      "name": "Respond 200"
+    },
+    {
+      "parameters": { "respondWith": "text", "responseBody": "Forbidden", "options": { "responseCode": 403 } },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [-1744, -560],
+      "name": "Reject 403"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Field paths verified from your real Twilio payload on 2026-10-20.\nconst b = $('Verify Twilio signature').first().json.body || {};\n\nreturn [{ json: {\n  phone: (b.From || '').replace('whatsapp:', ''),  // E.164, e.g. +91XXXXXXXXXX\n  text: (b.Body || '').trim(),\n  message_sid: b.MessageSid || '',                 // dedup key\n  profile_name: b.ProfileName || ''\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-1520, -752],
+      "name": "Parse inbound"
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "messages",
+        "limit": 1,
+        "matchType": "allFilters",
+        "filters": { "conditions": [ { "keyName": "external_id", "condition": "eq", "keyValue": "={{ $('Parse inbound').first().json.message_sid }}" } ] }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [-1296, -752],
+      "name": "Check dedup",
+      "alwaysOutputData": true,
+      "credentials": { "supabaseApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Supabase - lead-followup" } }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 3 },
+          "conditions": [ { "leftValue": "={{ !!$json.id }}", "rightValue": "", "operator": { "type": "boolean", "operation": "true", "singleValue": true } } ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [-1072, -752],
+      "name": "Already seen?"
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "leads",
+        "limit": 1,
+        "matchType": "allFilters",
+        "filters": { "conditions": [ { "keyName": "phone", "condition": "eq", "keyValue": "={{ $('Parse inbound').first().json.phone }}" } ] }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [-848, -752],
+      "name": "Find lead by phone",
+      "alwaysOutputData": true,
+      "credentials": { "supabaseApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Supabase - lead-followup" } }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 3 },
+          "conditions": [ { "leftValue": "={{ !!$json.id }}", "rightValue": "", "operator": { "type": "boolean", "operation": "true", "singleValue": true } } ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [-624, -752],
+      "name": "Lead found?"
+    },
+    {
+      "parameters": {
+        "tableId": "messages",
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "lead_id", "fieldValue": "={{ $('Find lead by phone').first().json.id }}" },
+            { "fieldId": "direction", "fieldValue": "in" },
+            { "fieldId": "content", "fieldValue": "={{ $('Parse inbound').first().json.text }}" },
+            { "fieldId": "external_id", "fieldValue": "={{ $('Parse inbound').first().json.message_sid }}" }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [-400, -848],
+      "name": "Log inbound",
+      "credentials": { "supabaseApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Supabase - lead-followup" } }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Fuzzy opt-out: contains-match on trimmed, uppercased text (blueprint node 13).\n// Reads text from Parse inbound by name so it doesn't depend on Log inbound's output shape.\nconst text = ($('Parse inbound').first().json.text || '').trim().toUpperCase();\nconst keywords = ['STOP', 'UNSUBSCRIBE', 'QUIT', 'CANCEL', 'OPT OUT', 'OPT-OUT'];\nconst isOptOut = keywords.some(kw => text.includes(kw));\n\nreturn [{ json: { is_opt_out: isOptOut, matched_text: text } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-176, -848],
+      "name": "Check opt-out"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 3 },
+          "conditions": [ { "leftValue": "={{ $json.is_opt_out }}", "rightValue": "", "operator": { "type": "boolean", "operation": "true", "singleValue": true } } ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [48, -848],
+      "name": "Opt-out?"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 3 },
+          "conditions": [ { "leftValue": "={{ $('Find lead by phone').first().json.status }}", "rightValue": "handoff", "operator": { "type": "string", "operation": "equals", "name": "filter.operator.equals" } } ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [272, -752],
+      "name": "Status = handoff?"
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": { "__rl": true, "value": "YOUR_SLACK_CHANNEL_ID", "mode": "id" },
+        "text": "=   ⚠️ POST-HANDOFF MESSAGE   \nLead: {{ $('Find lead by phone').first().json.name }} ({{ $('Parse inbound').first().json.phone }})    \nWorkflow: WF2   \nMessage: {{ $('Parse inbound').first().json.text.slice(0, 200) }}    \nAction needed: this lead is already with a human. Reply manually.    \nTime: {{ $now.toISO() }}",
+        "otherOptions": { "includeLinkToWorkflow": false }
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.7,
+      "position": [496, -848],
+      "name": "Alert Slack: post-handoff msg",
+      "credentials": { "slackApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Slack - Lead Alerts Bot" } }
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "messages",
+        "limit": 10,
+        "orderBy": "created_at.desc",
+        "matchType": "allFilters",
+        "filters": { "conditions": [ { "keyName": "lead_id", "condition": "eq", "keyValue": "={{ $('Find lead by phone').first().json.id }}" } ] }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [496, -656],
+      "name": "Fetch last 10 messages",
+      "alwaysOutputData": true,
+      "credentials": { "supabaseApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Supabase - lead-followup" } }
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "qualifications",
+        "limit": 1,
+        "matchType": "allFilters",
+        "filters": { "conditions": [ { "keyName": "lead_id", "condition": "eq", "keyValue": "={{ $('Find lead by phone').first().json.id }}" } ] }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [720, -656],
+      "name": "Fetch qualification",
+      "alwaysOutputData": true,
+      "executeOnce": true,
+      "credentials": { "supabaseApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Supabase - lead-followup" } }
+    },
+    {
+      "parameters": {
+        "jsCode": "const SYSTEM_PROMPT = `You are a real estate assistant for an Indian market. You talk to leads on WhatsApp to understand what property they are looking for.\n\nYour job:\n1. Greet the lead if this is the start of the conversation.\n2. Ask about: budget, preferred location, property type (apartment/villa/plot/commercial), and timeline (when they want to buy/move).\n3. Write reply_text in the language named in the last line of the user prompt, and set the \"language\" field to match.\n4. When all four fields are collected AND the lead explicitly asks for a call, site visit, or meeting, set visit_requested to true and score to hot.\n5. Do NOT re-ask fields listed under \"Fields already collected\". But if the lead's latest message gives a NEW or CORRECTED value for one of them (for example a shorter timeline), put that new value in \"extracted\" for that field.\n6. Be conversational, friendly, and brief. This is WhatsApp, not email.\n7. If the lead asks something you cannot help with (legal, finance, unrelated), say politely that you'll connect them with someone who can help.\n8. Never promise, schedule or confirm a call, visit or callback in reply_text, and never say you will arrange one. If the lead asks for one, simply acknowledge the request and continue qualifying. The system adds any confirmation itself.\n9. In \"extracted\", fill a field whenever the lead's latest message states or corrects it, even if it is already collected. Use null only when the latest message says nothing about that field.\n\nReturn ONLY a single JSON object, no markdown, no explanation:\n{\n  \"reply_text\": \"your reply message\",\n  \"language\": \"hi\" or \"en\",\n  \"extracted\": {\n    \"budget\": \"string or null\",\n    \"location\": \"string or null\",\n    \"property_type\": \"string or null\",\n    \"timeline\": \"string or null\"\n  },\n  \"visit_requested\": true or false,\n  \"score\": \"cold\" or \"warm\" or \"hot\",\n  \"score_reason\": \"one line explaining the score\",\n  \"missing_fields\": [\"list of fields still unknown\"],\n  \"handoff\": false,\n  \"summary\": \"one line summary of where this lead stands\"\n}\n\nRules for scoring:\n- hot: budget, location, and timeline are known, timeline is within about 30 days, and lead has explicitly asked for a call or site visit. All four must be true.\n- warm: some fields are known, lead is interested, timeline is unclear or 1-6 months.\n- cold: vague inquiry, no budget or location, timeline beyond 6 months or not mentioned.\n\nNever set handoff to true yourself. Code handles that.`;\n\n// Messages arrive newest-first; drop the empty placeholder item (no id), then reverse.\nconst msgs = $('Fetch last 10 messages').all()\n  .map(i => i.json)\n  .filter(m => m && m.id)\n  .reverse();\nconst qual = $('Fetch qualification').first()?.json || {};\nconst lead = $('Find lead by phone').first().json;\n\n// Code decides the reply language; the model only follows it.\n// The latest message wins when it is clear (Devanagari -> Hindi, 3+ Latin words -> English).\n// If it is short or ambiguous (ok, yes), look at the previous inbound messages (up to 3 in total), newest first.\n// If still undecided: any Latin letters in that window mean English; the stored preference is the last resort.\nconst latest = $('Parse inbound').first().json.text || '';\nconst earlier = msgs.filter(m => m.direction === 'in').map(m => m.content || '').reverse();\nif (earlier[0] === latest) earlier.shift();\nconst decide = t => /[\\u0900-\\u097F]/.test(t) ? 'hi' : ((t.match(/[A-Za-z]+/g) || []).length >= 3 ? 'en' : null);\nconst win = [latest, ...earlier].slice(0, 3);\nlet replyLang = null;\nfor (const t of win) { replyLang = decide(t); if (replyLang) break; }\n// Short Latin-only messages (\"ok\", \"Hello\") with no Devanagari in the window count as English.\nif (!replyLang && win.some(t => /[A-Za-z]/.test(t))) replyLang = 'en';\n// Stored preference is used only when the window has no letters at all (emoji, digits).\nif (!replyLang) replyLang = lead.preferred_language === 'hi' ? 'hi' : 'en';\nconst langName = replyLang === 'hi' ? 'Hindi' : 'English';\n\nlet history = '';\nfor (const m of msgs) {\n  history += `${m.direction === 'out' ? 'Agent' : 'Lead'}: ${m.content}\\n`;\n}\n\n// D13 fix: tell the model which fields are already known so it doesn't re-ask.\nconst fields = ['budget', 'location', 'property_type', 'timeline'];\nconst known = fields.filter(f => qual[f]);\nlet knownText = '';\nif (known.length) {\n  knownText = 'Fields already collected (do NOT re-ask these):\\n' +\n    known.map(f => `- ${f}: ${qual[f]}`).join('\\n') + '\\n';\n  if (qual.visit_requested) knownText += '- visit_requested: true\\n';\n}\n\nconst user_prompt = `Lead name: ${lead.name || 'unknown'}\nLead score: ${lead.score}\n\n${knownText}\nConversation so far:\n${history}\nRespond to the lead's latest message. Write reply_text in ${langName} and set \"language\" to \"${replyLang}\".`;\n\nreturn [{ json: { system_prompt: SYSTEM_PROMPT, user_prompt } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [944, -656],
+      "name": "Build context"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: 'gpt-4o-mini',\n  messages: [\n    { role: 'system', content: $json.system_prompt },\n    { role: 'user', content: $json.user_prompt }\n  ],\n  response_format: { type: 'json_object' },\n  temperature: 0.3\n}) }}",
+        "options": { "timeout": 30000 }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [1168, -656],
+      "name": "LLM call",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "onError": "continueErrorOutput",
+      "credentials": { "openAiApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "OpenAI account" } }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Response shape verified from a real run on 2026-10-21: choices[0].message.content (JSON string)\nconst res = $input.first().json;\nconst raw = res.choices?.[0]?.message?.content ?? '';\nconst qual = $('Fetch qualification').first()?.json || {};\n\nconst FIELDS = ['budget', 'location', 'property_type', 'timeline'];\nconst clean = v => {\n  if (typeof v !== 'string') return null;\n  const t = v.trim();\n  return (!t || ['null', 'none', 'unknown', 'n/a'].includes(t.toLowerCase())) ? null : t;\n};\nconst toAscii = s => s.replace(/[०-९]/g, d => String('०१२३४५६७८९'.indexOf(d)));\n\n// Best-effort timeline -> days. Returns null if it can't be parsed (not a date calculation).\nfunction timelineDays(text) {\n  const m = toAscii(text.toLowerCase()).match(\n    /(\\d+)\\s*(days?|din|दिन|weeks?|hafte|hafta|सप्ताह|हफ्ते|हफ़्ते|months?|mahine|mahina|महीने|महीना|महीन|years?|saal|sal|साल|वर्ष)/\n  );\n  if (!m) return null;\n  const n = parseInt(m[1], 10);\n  const u = m[2];\n  let mult = null;\n  if (/^(day|din|दिन)/.test(u)) mult = 1;\n  else if (/^(week|haft|सप्ताह|हफ)/.test(u)) mult = 7;\n  else if (/^(month|mahin|महीन)/.test(u)) mult = 30;\n  else if (/^(year|saal|sal|साल|वर्ष)/.test(u)) mult = 365;\n  return mult ? n * mult : null;\n}\n\nlet ok = false, error = null, out = {};\ntry {\n  const d = JSON.parse(raw);\n  if (typeof d.reply_text !== 'string' || !d.reply_text.trim()) throw new Error('reply_text missing');\n  if (!['cold', 'warm', 'hot'].includes(d.score)) throw new Error('bad score');\n  if (!['hi', 'en'].includes(d.language)) throw new Error('bad language');\n  if (!d.extracted || typeof d.extracted !== 'object') throw new Error('extracted missing');\n\n  // Stored qualification + non-null values from this turn\n  const merged = {};\n  for (const f of FIELDS) merged[f] = clean(d.extracted[f]) ?? clean(qual[f]);\n  const visit = d.visit_requested === true || qual.visit_requested === true;\n\n  let score = d.score;\n  let reason = d.score_reason || '';\n  if (score === 'hot') {\n    let why = null;\n    if (!merged.budget || !merged.location || !merged.timeline) why = 'missing budget, location or timeline';\n    else if (!visit) why = 'no explicit visit/call request';\n    else {\n      const days = timelineDays(merged.timeline);\n      if (days !== null && days > 30) why = `timeline about ${days} days, over 30`;\n    }\n    if (why) { score = 'warm'; reason = `Downgraded by code (${why}). ` + reason; }\n  }\n\n  // Code adds the call confirmation only when the final (code-checked) score is hot.\n  let reply = d.reply_text.trim();\n  if (score === 'hot') {\n    reply += d.language === 'hi'\n      ? '\\n\\nहमारी टीम का एक सदस्य जल्द ही आपको कॉल करेगा।'\n      : '\\n\\nA team member will call you shortly.';\n  }\n\n  out = {\n    reply_text: reply,\n    language: d.language,\n    score,\n    score_reason: reason,\n    handoff: score === 'hot',          // code decides, never the model\n    visit_requested: visit,\n    summary: typeof d.summary === 'string' ? d.summary : '',\n    missing_fields: Array.isArray(d.missing_fields) ? d.missing_fields : [],\n    ...merged\n  };\n  ok = true;\n} catch (e) {\n  error = e.message;\n}\n\nreturn [{ json: { parse_ok: ok, error, raw, ...out } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1392, -736],
+      "name": "Parse LLM"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 3 },
+          "conditions": [ { "leftValue": "={{ $json.parse_ok }}", "rightValue": "", "operator": { "type": "boolean", "operation": "true", "singleValue": true } } ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [1616, -736],
+      "name": "Parse OK?"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 3 },
+          "conditions": [ { "leftValue": "={{ !!$('Fetch qualification').first().json.lead_id }}", "rightValue": "", "operator": { "type": "boolean", "operation": "true", "singleValue": true } } ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [1840, -784],
+      "name": "Qualification exists?"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "qualifications",
+        "matchType": "allFilters",
+        "filters": { "conditions": [ { "keyName": "lead_id", "condition": "eq", "keyValue": "={{ $('Find lead by phone').first().json.id }}" } ] },
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "lead_id", "fieldValue": "={{ $('Find lead by phone').first().json.id }}" },
+            { "fieldId": "budget", "fieldValue": "={{ $('Parse LLM').first().json.budget ?? null }}" },
+            { "fieldId": "location", "fieldValue": "={{ $('Parse LLM').first().json.location ?? null }}" },
+            { "fieldId": "property_type", "fieldValue": "={{ $('Parse LLM').first().json.property_type ?? null }}" },
+            { "fieldId": "timeline", "fieldValue": "={{ $('Parse LLM').first().json.timeline ?? null }}" },
+            { "fieldId": "visit_requested", "fieldValue": "={{ $('Parse LLM').first().json.visit_requested }}" },
+            { "fieldId": "summary", "fieldValue": "={{ $('Parse LLM').first().json.summary }}" },
+            { "fieldId": "updated_at", "fieldValue": "={{ $now.toISO() }}" }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [2064, -880],
+      "name": "Update qualification",
+      "credentials": { "supabaseApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Supabase - lead-followup" } }
+    },
+    {
+      "parameters": {
+        "tableId": "qualifications",
+        "fieldsUi": { "fieldValues": [ { "fieldId": "lead_id", "fieldValue": "={{ $('Find lead by phone').first().json.id }}" } ] }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [2064, -688],
+      "name": "Create qualification",
+      "credentials": { "supabaseApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Supabase - lead-followup" } }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "leads",
+        "matchType": "allFilters",
+        "filters": { "conditions": [ { "keyName": "id", "condition": "eq", "keyValue": "={{ $('Find lead by phone').first().json.id }}" } ] },
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "score", "fieldValue": "={{ $('Parse LLM').first().json.score }}" },
+            { "fieldId": "status", "fieldValue": "={{ $('Parse LLM').first().json.handoff ? 'handoff' : 'qualifying' }}" },
+            { "fieldId": "next_follow_up_at", "fieldValue": "={{ ['warm','cold'].includes($('Parse LLM').first().json.score) ? $now.plus({ days: $('Parse LLM').first().json.score === 'warm' ? 1 : 3 }).toISO() : null }}" },
+            { "fieldId": "followup_count", "fieldValue": "0" },
+            { "fieldId": "send_error", "fieldValue": "={{ null }}" }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [2288, -784],
+      "name": "Update lead",
+      "credentials": { "supabaseApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Supabase - lead-followup" } }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 3 },
+          "conditions": [ { "leftValue": "={{ $('Parse LLM').first().json.handoff }}", "rightValue": "", "operator": { "type": "boolean", "operation": "true", "singleValue": true } } ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [2512, -784],
+      "name": "Is hot?"
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": { "__rl": true, "value": "#lead-alerts", "mode": "name" },
+        "text": "={{ [\n  '🔥 HOT LEAD',\n  'Lead: ' + $('Find lead by phone').first().json.name + ' (' + $('Parse inbound').first().json.phone + ')',\n  'Workflow: WF2',\n  'Budget: ' + $('Parse LLM').first().json.budget + ' | Location: ' + $('Parse LLM').first().json.location + ' | Timeline: ' + $('Parse LLM').first().json.timeline,\n  'Why hot: ' + $('Parse LLM').first().json.score_reason,\n  'Summary: ' + $('Parse LLM').first().json.summary,\n  'Action needed: call this lead now. Automation is paused for them.',\n  'Time: ' + $now.toISO()\n].join('\\n') }}",
+        "otherOptions": {}
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.7,
+      "position": [2736, -848],
+      "name": "Alert Slack: HOT LEAD",
+      "onError": "continueRegularOutput",
+      "credentials": { "slackApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Slack - Lead Alerts Bot" } }
+    },
+    {
+      "parameters": {
+        "from": "+14155238886",
+        "to": "={{ $('Parse inbound').first().json.phone }}",
+        "toWhatsapp": true,
+        "message": "={{ $('Parse LLM').first().json.reply_text }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.twilio",
+      "typeVersion": 1,
+      "position": [2960, -784],
+      "name": "Send reply",
+      "onError": "continueErrorOutput",
+      "credentials": { "twilioApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Twilio - WhatsApp Sandbox" } }
+    },
+    {
+      "parameters": {
+        "tableId": "messages",
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "lead_id", "fieldValue": "={{ $('Find lead by phone').first().json.id }}" },
+            { "fieldId": "direction", "fieldValue": "out" },
+            { "fieldId": "content", "fieldValue": "={{ $('Parse LLM').first().json.reply_text }}" }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [3184, -880],
+      "name": "Log reply",
+      "credentials": { "supabaseApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Supabase - lead-followup" } }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": { "__rl": true, "value": "#lead-alerts", "mode": "name" },
+        "text": "={{ [\n  '⚠️ REPLY SEND FAILED',\n  'Lead: ' + $('Find lead by phone').first().json.name + ' (' + $('Parse inbound').first().json.phone + ')',\n  'Workflow: WF2',\n  'Error: ' + ($json.error?.message ?? 'unknown'),\n  'Reply that failed: ' + $('Parse LLM').first().json.reply_text,\n  'Action needed: send manually or check Twilio.',\n  'Time: ' + $now.toISO()\n].join('\\n') }}",
+        "otherOptions": {}
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.7,
+      "position": [3184, -688],
+      "name": "Alert Slack: reply send failed",
+      "credentials": { "slackApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Slack - Lead Alerts Bot" } }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "leads",
+        "matchType": "allFilters",
+        "filters": { "conditions": [ { "keyName": "id", "condition": "eq", "keyValue": "={{ $('Find lead by phone').first().json.id }}" } ] },
+        "fieldsUi": { "fieldValues": [ { "fieldId": "opted_out", "fieldValue": "true" } ] }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [272, -1040],
+      "name": "Mark opted out",
+      "credentials": { "supabaseApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Supabase - lead-followup" } }
+    },
+    {
+      "parameters": {
+        "from": "+14155238886",
+        "to": "={{ $('Parse inbound').first().json.phone }}",
+        "toWhatsapp": true,
+        "message": "=You've been unsubscribed. You won't receive further messages.\nआपको अनसब्सक्राइब कर दिया गया है। अब आपको संदेश नहीं मिलेंगे।",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.twilio",
+      "typeVersion": 1,
+      "position": [496, -1040],
+      "name": "Send opt-out confirm",
+      "onError": "continueErrorOutput",
+      "credentials": { "twilioApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Twilio - WhatsApp Sandbox" } }
+    },
+    {
+      "parameters": {
+        "tableId": "messages",
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "lead_id", "fieldValue": "={{ $('Find lead by phone').first().json.id }}" },
+            { "fieldId": "direction", "fieldValue": "out" },
+            { "fieldId": "content", "fieldValue": "You've been unsubscribed. You won't receive further messages. आपको अनसब्सक्राइब कर दिया गया है। अब आपको संदेश नहीं मिलेंगे।" }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [720, -1120],
+      "name": "Log confirm",
+      "credentials": { "supabaseApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Supabase - lead-followup" } }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": { "__rl": true, "value": "#lead-alerts", "mode": "name" },
+        "text": "={{ [\n  '🚫 OPT-OUT',\n  'Lead: ' + $('Find lead by phone').first().json.name + ' (' + $('Parse inbound').first().json.phone + ')',\n  'Workflow: WF2',\n  'Message: ' + $('Parse inbound').first().json.text.slice(0, 200),\n  'Action needed: none. Lead is excluded from all further messages.',\n  'Time: ' + $now.toISO()\n].join('\\n') }}",
+        "otherOptions": {}
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.7,
+      "position": [944, -1040],
+      "name": "Alert Slack: opt-out",
+      "credentials": { "slackApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Slack - Lead Alerts Bot" } }
+    },
+    {
+      "parameters": {
+        "tableId": "messages",
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "direction", "fieldValue": "in" },
+            { "fieldId": "content", "fieldValue": "={{ $('Parse inbound').first().json.text }}" },
+            { "fieldId": "external_id", "fieldValue": "={{ $('Parse inbound').first().json.message_sid }}" }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [-400, -656],
+      "name": "Log unknown",
+      "credentials": { "supabaseApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Supabase - lead-followup" } }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": { "__rl": true, "value": "#lead-alerts", "mode": "name" },
+        "text": "={{ [\n  '❓ UNKNOWN SENDER',\n  'Phone: ' + $('Parse inbound').first().json.phone,\n  'WhatsApp name: ' + $('Parse inbound').first().json.profile_name + ' (set by the sender, unverified)',\n  'Workflow: WF2',\n  'Message: ' + $('Parse inbound').first().json.text.slice(0, 200),\n  'Action needed: check whether this is a real lead. No reply was sent.',\n  'Time: ' + $now.toISO()\n].join('\\n') }}",
+        "otherOptions": { "includeLinkToWorkflow": false }
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.7,
+      "position": [-176, -656],
+      "name": "Alert Slack: unknown sender",
+      "credentials": { "slackApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Slack - Lead Alerts Bot" } }
+    },
+    {
+      "parameters": {
+        "from": "+14155238886",
+        "to": "={{ $('Parse inbound').first().json.phone }}",
+        "toWhatsapp": true,
+        "message": "=Thanks for your message! Let me connect you with someone who can help.\nआपके संदेश के लिए धन्यवाद! मैं आपको किसी ऐसे व्यक्ति से जोड़ता हूँ जो मदद कर सके।",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.twilio",
+      "typeVersion": 1,
+      "position": [1840, -464],
+      "name": "Send fallback",
+      "onError": "continueRegularOutput",
+      "credentials": { "twilioApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Twilio - WhatsApp Sandbox" } }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "leads",
+        "matchType": "allFilters",
+        "filters": { "conditions": [ { "keyName": "id", "condition": "eq", "keyValue": "={{ $('Find lead by phone').first().json.id }}" } ] },
+        "fieldsUi": { "fieldValues": [ { "fieldId": "status", "fieldValue": "handoff" } ] }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [2064, -464],
+      "name": "Flag for review",
+      "credentials": { "supabaseApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Supabase - lead-followup" } }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": { "__rl": true, "value": "#lead-alerts", "mode": "name" },
+        "text": "={{ [   '⚠️ LLM FAILED',   'Lead: ' + $('Find lead by phone').first().json.name + ' (' + $('Parse inbound').first().json.phone + ')',   'Workflow: WF2',   'Details: the reply step failed (bad JSON or OpenAI error). Fallback message sent. Check the execution log.',   'Action needed: lead flagged for review. Reply manually.',   'Time: ' + $now.toISO() ].join('\\n') }}",
+        "otherOptions": {}
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.7,
+      "position": [2288, -464],
+      "name": "Alert Slack: LLM failed",
+      "credentials": { "slackApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Slack - Lead Alerts Bot" } }
+    }
+  ],
+  "connections": {
+    "Webhook": { "main": [[{ "node": "Verify Twilio signature", "type": "main", "index": 0 }]] },
+    "Verify Twilio signature": { "main": [[{ "node": "Signature valid?", "type": "main", "index": 0 }]] },
+    "Signature valid?": { "main": [[{ "node": "Respond 200", "type": "main", "index": 0 }], [{ "node": "Reject 403", "type": "main", "index": 0 }]] },
+    "Respond 200": { "main": [[{ "node": "Parse inbound", "type": "main", "index": 0 }]] },
+    "Parse inbound": { "main": [[{ "node": "Check dedup", "type": "main", "index": 0 }]] },
+    "Check dedup": { "main": [[{ "node": "Already seen?", "type": "main", "index": 0 }]] },
+    "Already seen?": { "main": [[], [{ "node": "Find lead by phone", "type": "main", "index": 0 }]] },
+    "Find lead by phone": { "main": [[{ "node": "Lead found?", "type": "main", "index": 0 }]] },
+    "Lead found?": { "main": [[{ "node": "Log inbound", "type": "main", "index": 0 }], [{ "node": "Log unknown", "type": "main", "index": 0 }]] },
+    "Log inbound": { "main": [[{ "node": "Check opt-out", "type": "main", "index": 0 }]] },
+    "Check opt-out": { "main": [[{ "node": "Opt-out?", "type": "main", "index": 0 }]] },
+    "Opt-out?": { "main": [[{ "node": "Mark opted out", "type": "main", "index": 0 }], [{ "node": "Status = handoff?", "type": "main", "index": 0 }]] },
+    "Status = handoff?": { "main": [[{ "node": "Alert Slack: post-handoff msg", "type": "main", "index": 0 }], [{ "node": "Fetch last 10 messages", "type": "main", "index": 0 }]] },
+    "Fetch last 10 messages": { "main": [[{ "node": "Fetch qualification", "type": "main", "index": 0 }]] },
+    "Fetch qualification": { "main": [[{ "node": "Build context", "type": "main", "index": 0 }]] },
+    "Build context": { "main": [[{ "node": "LLM call", "type": "main", "index": 0 }]] },
+    "LLM call": { "main": [[{ "node": "Parse LLM", "type": "main", "index": 0 }], [{ "node": "Send fallback", "type": "main", "index": 0 }]] },
+    "Parse LLM": { "main": [[{ "node": "Parse OK?", "type": "main", "index": 0 }]] },
+    "Parse OK?": { "main": [[{ "node": "Qualification exists?", "type": "main", "index": 0 }], [{ "node": "Send fallback", "type": "main", "index": 0 }]] },
+    "Qualification exists?": { "main": [[{ "node": "Update qualification", "type": "main", "index": 0 }], [{ "node": "Create qualification", "type": "main", "index": 0 }]] },
+    "Update qualification": { "main": [[{ "node": "Update lead", "type": "main", "index": 0 }]] },
+    "Create qualification": { "main": [[{ "node": "Update lead", "type": "main", "index": 0 }]] },
+    "Update lead": { "main": [[{ "node": "Is hot?", "type": "main", "index": 0 }]] },
+    "Is hot?": { "main": [[{ "node": "Alert Slack: HOT LEAD", "type": "main", "index": 0 }], [{ "node": "Send reply", "type": "main", "index": 0 }]] },
+    "Alert Slack: HOT LEAD": { "main": [[{ "node": "Send reply", "type": "main", "index": 0 }]] },
+    "Send reply": { "main": [[{ "node": "Log reply", "type": "main", "index": 0 }], [{ "node": "Alert Slack: reply send failed", "type": "main", "index": 0 }]] },
+    "Mark opted out": { "main": [[{ "node": "Send opt-out confirm", "type": "main", "index": 0 }]] },
+    "Send opt-out confirm": { "main": [[{ "node": "Log confirm", "type": "main", "index": 0 }], [{ "node": "Alert Slack: opt-out", "type": "main", "index": 0 }]] },
+    "Log confirm": { "main": [[{ "node": "Alert Slack: opt-out", "type": "main", "index": 0 }]] },
+    "Log unknown": { "main": [[{ "node": "Alert Slack: unknown sender", "type": "main", "index": 0 }]] },
+    "Send fallback": { "main": [[{ "node": "Flag for review", "type": "main", "index": 0 }]] },
+    "Flag for review": { "main": [[{ "node": "Alert Slack: LLM failed", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "active": false
+}

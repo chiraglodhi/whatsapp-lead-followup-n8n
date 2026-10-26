@@ -1,0 +1,194 @@
+{
+  "name": "WF4 — Data Deletion",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## WF4 data deletion\nAdmin tool. Keep UNPUBLISHED: run from the editor. Requires typed DELETE. Covers Supabase only (Twilio logs, n8n execution history and Slack history are not cleared). Slack gets only the last 4 phone digits.",
+        "height": 144,
+        "width": 400,
+        "color": "#0D2B20"
+      },
+      "name": "Sticky Note 4a000041",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-208, -128]
+    },
+    {
+      "parameters": {
+        "formTitle": "Delete a lead (WF4)",
+        "formDescription": "Permanently deletes the lead with this phone number, plus all their messages and qualification data. Cannot be undone.",
+        "formFields": {
+          "values": [
+            { "fieldLabel": "Lead phone number", "fieldName": "phone", "placeholder": "+919876543210", "requiredField": true },
+            { "fieldLabel": "Type DELETE to confirm", "fieldName": "confirm", "placeholder": "DELETE", "requiredField": true }
+          ]
+        },
+        "options": { "appendAttribution": false }
+      },
+      "name": "Deletion request form",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.6,
+      "position": [0, 288]
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json;\n// Same normalisation as WF1 (India-only prototype)\nlet phone = String(raw.phone || '').replace(/[\\s\\-\\(\\)]/g, '');\nif (phone.startsWith('0')) phone = '+91' + phone.slice(1);\nelse if (phone && !phone.startsWith('+')) phone = '+91' + phone;\nconst phoneOk = /^\\+91\\d{10}$/.test(phone);\nconst confirmOk = String(raw.confirm || '').trim() === 'DELETE';\nlet reason = null;\nif (!phoneOk) reason = 'Invalid phone format. Nothing was deleted.';\nelse if (!confirmOk) reason = 'Confirmation text must be exactly DELETE. Nothing was deleted.';\nreturn [{ json: { valid: phoneOk && confirmOk, phone, reason } }];"
+      },
+      "name": "Validate input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [224, 288]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 3 },
+          "conditions": [
+            { "leftValue": "={{ $json.valid }}", "operator": { "type": "boolean", "operation": "true", "singleValue": true } }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "Input valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [448, 288]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "leads",
+        "limit": 1,
+        "matchType": "allFilters",
+        "filters": { "conditions": [ { "keyName": "phone", "condition": "eq", "keyValue": "={{ $json.phone }}" } ] }
+      },
+      "name": "Find lead by phone",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [672, 192],
+      "alwaysOutputData": true,
+      "credentials": { "supabaseApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Supabase - lead-followup" } }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 3 },
+          "conditions": [
+            { "leftValue": "={{ $json.id }}", "operator": { "type": "string", "operation": "exists", "singleValue": true } }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "Lead found?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [896, 192]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "messages",
+        "returnAll": true,
+        "matchType": "allFilters",
+        "filters": { "conditions": [ { "keyName": "lead_id", "condition": "eq", "keyValue": "={{ $(\"Find lead by phone\").first().json.id }}" } ] }
+      },
+      "name": "Count messages",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1120, 96],
+      "alwaysOutputData": true,
+      "credentials": { "supabaseApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Supabase - lead-followup" } }
+    },
+    {
+      "parameters": {
+        "operation": "delete",
+        "tableId": "leads",
+        "matchType": "allFilters",
+        "filters": { "conditions": [ { "keyName": "id", "condition": "eq", "keyValue": "={{ $(\"Find lead by phone\").first().json.id }}" } ] }
+      },
+      "name": "Delete lead (cascade)",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1344, 96],
+      "executeOnce": true,
+      "onError": "continueErrorOutput",
+      "credentials": { "supabaseApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Supabase - lead-followup" } }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": { "__rl": true, "value": "#lead-alerts", "mode": "name" },
+        "text": "=🗑️ DATA DELETED\nLead: phone ending {{ $(\"Validate input\").first().json.phone.slice(-4) }} (name not logged here on purpose)\nWorkflow: WF4\nDetails: lead row deleted; {{ $(\"Count messages\").all().filter(i => i.json.id).length }} messages removed by cascade, qualification removed by cascade\nTime: {{ $now.toISO() }}\nAction needed: none. If a data-deletion request prompted this, also clear Twilio logs and n8n execution history manually.",
+        "otherOptions": { "includeLinkToWorkflow": false }
+      },
+      "name": "Alert Slack: data deleted",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.7,
+      "position": [1568, 0],
+      "onError": "continueRegularOutput",
+      "credentials": { "slackApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Slack - Lead Alerts Bot" } }
+    },
+    {
+      "parameters": {
+        "operation": "completion",
+        "completionTitle": "Deleted",
+        "completionMessage": "=Deleted lead ending {{ $(\"Validate input\").first().json.phone.slice(-4) }}. {{ $(\"Count messages\").all().filter(i => i.json.id).length }} messages and the qualification record were removed by cascade.",
+        "options": {}
+      },
+      "name": "Page: deleted",
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.5,
+      "position": [1792, 0]
+    },
+    {
+      "parameters": {
+        "operation": "completion",
+        "completionTitle": "Delete failed",
+        "completionMessage": "The delete did not complete. Check the execution log. Data may still exist.",
+        "options": {}
+      },
+      "name": "Page: delete failed",
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.5,
+      "position": [1568, 192]
+    },
+    {
+      "parameters": {
+        "operation": "completion",
+        "completionTitle": "No lead found",
+        "completionMessage": "No lead exists with that phone number. Nothing was deleted.",
+        "options": {}
+      },
+      "name": "Page: no lead found",
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.5,
+      "position": [1120, 288]
+    },
+    {
+      "parameters": {
+        "operation": "completion",
+        "completionTitle": "Rejected",
+        "completionMessage": "={{ $json.reason }}",
+        "options": {}
+      },
+      "name": "Page: rejected",
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.5,
+      "position": [672, 384]
+    }
+  ],
+  "connections": {
+    "Deletion request form": { "main": [[{ "node": "Validate input", "type": "main", "index": 0 }]] },
+    "Validate input": { "main": [[{ "node": "Input valid?", "type": "main", "index": 0 }]] },
+    "Input valid?": { "main": [[{ "node": "Find lead by phone", "type": "main", "index": 0 }], [{ "node": "Page: rejected", "type": "main", "index": 0 }]] },
+    "Find lead by phone": { "main": [[{ "node": "Lead found?", "type": "main", "index": 0 }]] },
+    "Lead found?": { "main": [[{ "node": "Count messages", "type": "main", "index": 0 }], [{ "node": "Page: no lead found", "type": "main", "index": 0 }]] },
+    "Count messages": { "main": [[{ "node": "Delete lead (cascade)", "type": "main", "index": 0 }]] },
+    "Delete lead (cascade)": { "main": [[{ "node": "Alert Slack: data deleted", "type": "main", "index": 0 }], [{ "node": "Page: delete failed", "type": "main", "index": 0 }]] },
+    "Alert Slack: data deleted": { "main": [[{ "node": "Page: deleted", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "active": false
+}

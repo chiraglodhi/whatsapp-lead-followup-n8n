@@ -1,0 +1,7 @@
+{
+  "_note": "WF1 form fields. Phone is normalised to +91XXXXXXXXXX. Leads with an invalid phone or no consent are dropped silently (see Known Limitations).",
+  "name": "Example Lead",
+  "phone": "9876543210",
+  "preferred_language": "en",
+  "consent": "yes"
+}
